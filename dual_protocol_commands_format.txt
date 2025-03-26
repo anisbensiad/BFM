@@ -1,0 +1,43 @@
+# Dual Protocol (AHB/AXI4) Transaction Command Format
+#
+# General Format: <protocol> <command_type> <parameters>
+#
+# Protocols:
+# AHB: Use AHB protocol
+# AXI: Use AXI protocol
+#
+# Command Types:
+# WRITE: Write transaction
+# READ: Read transaction
+# WAIT: Wait for specified clock cycles
+# BURST_WRITE: Burst write transaction (AXI only)
+# BURST_READ: Burst read transaction (AXI only)
+#
+# Parameters Format:
+#
+# For AHB WRITE:
+# AHB WRITE <address_hex> <data_hex> [burst_type] [size]
+# Example: AHB WRITE 0x1000_0000 0xDEADBEEF SINGLE WORD
+#
+# For AHB READ:
+# AHB READ <address_hex> [burst_type] [size]
+# Example: AHB READ 0x1000_0000 INCR4 WORD
+#
+# For AXI WRITE:
+# AXI WRITE <address_hex> <data_hex> [burst_type] [len]
+# Example: AXI WRITE 0x1000_0000 0xDEADBEEFCAFEBABE INCR 0
+#
+# For AXI READ:
+# AXI READ <address_hex> [burst_type] [len]
+# Example: AXI READ 0x1000_0000 WRAP 7
+#
+# For WAIT:
+# WAIT <cycles>
+# Example: WAIT 10
+#
+# Burst Types:
+# AHB: SINGLE, INCR, INCR4, INCR8, INCR16, WRAP4, WRAP8, WRAP16
+# AXI: FIXED, INCR, WRAP
+#
+# Size (AHB only):
+# BYTE, HALFWORD, WORD
