@@ -1,6 +1,5 @@
 ///////////////////////////////////////////////////////////////////////////////
 // Dual Protocol Command Parser
-// Author: Anis Ben Said
 //
 // This class implements a command parser for the dual protocol BFM supporting both
 // AHB and AXI protocols with configurable AXI data width (64/128 bits).
@@ -14,10 +13,10 @@
 // AXI READ <address> [burst_type] [length] [expected_data]
 // WAIT <cycles>
 ///////////////////////////////////////////////////////////////////////////////
-
+import dual_protocol_pkg::*;
 class dual_protocol_command_parser #(
-    parameter AXI_DATA_WIDTH = 64  // Supports 64 or 128 bits
-);
+        parameter AXI_DATA_WIDTH = 64  // Supports 64 or 128 bits
+    );
     ///////////////////////////////////////////////////////////////////////////
     // Type Definitions
     ///////////////////////////////////////////////////////////////////////////
@@ -26,7 +25,8 @@ class dual_protocol_command_parser #(
     typedef enum {
         AHB,
         AXI,
-        WAIT
+        WAIT,
+        MEM_LOAD
     } protocol_t;
 
     // Command type enumeration
@@ -74,7 +74,7 @@ class dual_protocol_command_parser #(
     ///////////////////////////////////////////////////////////////////////////
     // Class Properties
     ///////////////////////////////////////////////////////////////////////////
-    
+
     // File handling
     protected int file_handle;
     protected string filename;
@@ -95,7 +95,7 @@ class dual_protocol_command_parser #(
         this.filename = filename;
         this.bfm = bfm;
         this.line_number = 0;
-        
+
         // Initialize results
         results.total_tests = 0;
         results.passed_tests = 0;
@@ -126,16 +126,19 @@ class dual_protocol_command_parser #(
 
         $display("[%0t] Starting command execution from file: %s", $time, filename);
         $display("[%0t] AXI Data Width configured as: %0d bits", $time, AXI_DATA_WIDTH);
-        
+
         // Process commands
         while (!$feof(file_handle)) begin
             if (read_next_valid_line()) begin
+
                 tokenize(current_line, command_tokens);
+
                 if (command_tokens.size() > 0) begin
                     process_command_line(command_tokens);
                 end
             end
         end
+
 
         $fclose(file_handle);
         report_results();
@@ -144,17 +147,58 @@ class dual_protocol_command_parser #(
     ///////////////////////////////////////////////////////////////////////////
     // Protected Tasks - Command Processing
     ///////////////////////////////////////////////////////////////////////////
+    // Add event for memory load completion
+    event mem_load_done;
+    bit mem_load_in_progress;
+
+    // Add timeout for safety
+    localparam int MEM_LOAD_TIMEOUT_NS = 1000000; // 1ms timeout
 
     // Process a single command line
     protected task automatic process_command_line(string tokens[$]);
         protocol_t protocol;
         command_t command;
-
+        string command_str;
         if (parse_protocol_and_command(tokens, protocol, command)) begin
             case (protocol)
                 AHB:  process_ahb_command(command, tokens);
                 AXI:  process_axi_command(command, tokens);
                 WAIT: process_wait_command(tokens);
+                MEM_LOAD :             MEM: begin
+
+                    // Wait if there's already a memory load in progress
+                    if (mem_load_in_progress) begin
+                        // Create command string for display
+                        command_str = tokens[0];
+                        for (int i = 1; i < tokens.size(); i++) begin
+                            command_str = {command_str, " ", tokens[i]};
+                        end
+
+                        $display("[%0t] Waiting for previous memory load to complete before processing: %s",
+                            $time, command_str);
+                        fork
+                            begin
+                                // Wait for completion with timeout
+                                fork
+                                    begin
+                                        @(mem_load_done);
+                                    end
+                                    begin
+                                        #MEM_LOAD_TIMEOUT_NS;
+                                        $error("[%0t] Memory load timeout occurred!", $time);
+                                    end
+                                join_any
+                                disable fork;
+                            end
+                        join
+                    end
+
+                    // Set flag and process command
+                    mem_load_in_progress = 1;
+                    process_mem_load_command(tokens);
+
+
+                end
             endcase
         end
     endtask
@@ -193,7 +237,7 @@ class dual_protocol_command_parser #(
                 // Execute write
                 bfm.ahb_write(address, data, burst_type, size);
                 $display("[%0t] Line %0d: AHB Write - Address: 0x%h, Data: 0x%h, Burst: %s, Size: %s",
-                        $time, line_number, address, data, tokens[4], tokens[5]);
+                    $time, line_number, address, data, tokens[4], tokens[5]);
             end
 
             CMD_READ: begin
@@ -201,9 +245,9 @@ class dual_protocol_command_parser #(
                 has_expected_data = 0;
 
                 // Parse optional parameters
-                if (tokens.size() > param_index && 
-                    !(tokens[param_index] inside {"BYTE", "HALFWORD", "WORD"}) &&
-                    !(tokens[param_index] inside {"SINGLE", "INCR", "INCR4", "INCR8", "INCR16", "WRAP4", "WRAP8", "WRAP16"})) begin
+                if (tokens.size() > param_index &&
+                        !(tokens[param_index] inside {"BYTE", "HALFWORD", "WORD"}) &&
+                        !(tokens[param_index] inside {"SINGLE", "INCR", "INCR4", "INCR8", "INCR16", "WRAP4", "WRAP8", "WRAP16"})) begin
                     if (!parse_hex_value(tokens[param_index], expected_data, 32)) return;
                     has_expected_data = 1;
                 end else begin
@@ -225,17 +269,17 @@ class dual_protocol_command_parser #(
                     results.total_tests++;
                     if (data === expected_data) begin
                         results.passed_tests++;
-                        $display("[%0t] Line %0d: AHB Read PASS - Address: 0x%h, Data: 0x%h", 
-                                $time, line_number, address, data);
+                        $display("[%0t] Line %0d: AHB Read PASS - Address: 0x%h, Data: 0x%h",
+                            $time, line_number, address, data);
                     end else begin
                         results.failed_tests++;
                         results.last_error = $sformatf("AHB Read mismatch at 0x%h - Expected: 0x%h, Got: 0x%h",
-                                                      address, expected_data, data);
+                            address, expected_data, data);
                         $error("[%0t] Line %0d: %s", $time, line_number, results.last_error);
                     end
                 end else begin
                     $display("[%0t] Line %0d: AHB Read - Address: 0x%h, Data: 0x%h, Burst: %s, Size: %s",
-                            $time, line_number, address, data, burst_type.name(), size.name());
+                        $time, line_number, address, data, burst_type.name(), size.name());
                 end
             end
         endcase
@@ -244,11 +288,14 @@ class dual_protocol_command_parser #(
     // Process AXI commands
     protected task automatic process_axi_command(command_t command, string tokens[$]);
         logic [31:0] address;
-        logic [AXI_DATA_WIDTH-1:0] data, expected_data;
+        logic [AXI_DATA_WIDTH-1:0] data;
+        logic [AXI_DATA_WIDTH-1:0] data_beats[$];  // Queue to store multiple beats
+        logic [AXI_DATA_WIDTH-1:0] expected_data_beats[$];  // Queue for expected data
         logic has_expected_data;
         local_axi_burst_t burst_type = AXI_INCR;
         logic [7:0] len = 0;
         int param_index;
+        string data_token;
 
         // Validate minimum token count
         if (tokens.size() < 3) begin
@@ -261,6 +308,7 @@ class dual_protocol_command_parser #(
 
         case (command)
             CMD_WRITE, CMD_BURST_WRITE: begin
+                // Existing write handling remains the same
                 if (tokens.size() < 4) begin
                     $error("[%0t] Line %0d: Invalid AXI WRITE command format", $time, line_number);
                     return;
@@ -276,7 +324,7 @@ class dual_protocol_command_parser #(
                 // Execute write
                 bfm.axi_write(address, data, len, burst_type);
                 $display("[%0t] Line %0d: AXI Write - Address: 0x%h, Data: 0x%h, Burst: %s, Length: %0d",
-                        $time, line_number, address, data, burst_type.name(), len);
+                    $time, line_number, address, data, burst_type.name(), len);
             end
 
             CMD_READ, CMD_BURST_READ: begin
@@ -284,45 +332,79 @@ class dual_protocol_command_parser #(
                 has_expected_data = 0;
 
                 // Check if we have burst type
-                if (tokens.size() > param_index && 
-                    (tokens[param_index] inside {"FIXED", "INCR", "WRAP"})) begin
+                if (tokens.size() > param_index &&
+                        (tokens[param_index] inside {"FIXED", "INCR", "WRAP"})) begin
                     burst_type = parse_axi_burst_type(tokens[param_index]);
                     param_index++;
                 end
 
                 // Check if we have length
                 if (tokens.size() > param_index &&
-                    tokens[param_index].len() <= 3 &&  // Assume length is small number
-                    tokens[param_index][0] inside {"0","1","2","3","4","5","6","7","8","9"}) begin
+                        tokens[param_index].len() <= 3 &&  // Assume length is small number
+                        tokens[param_index][0] inside {"0","1","2","3","4","5","6","7","8","9"}) begin
                     void'($sscanf(tokens[param_index], "%d", len));
                     param_index++;
                 end
 
-                // Check if we have expected data
-                if (tokens.size() > param_index) begin
+                // Parse expected data beats if present
+                has_expected_data = 0;
+                expected_data_beats.delete();
+
+                while (tokens.size() > param_index) begin
+                    logic [AXI_DATA_WIDTH-1:0] expected_beat;
                     has_expected_data = 1;
-                    if (!parse_axi_data(tokens[param_index], expected_data)) return;
+
+                    if (!parse_axi_data(tokens[param_index], expected_beat)) return;
+                    expected_data_beats.push_back(expected_beat);
+                    param_index++;
                 end
 
+                if (has_expected_data) begin
+                    // Verify number of beats matches len+1
+                    if (expected_data_beats.size() != (len + 1)) begin
+                        $error("[%0t] Line %0d: Number of expected data beats (%0d) does not match AXI len field + 1 (%0d)",
+                            $time, line_number, expected_data_beats.size(), len + 1);
+                        return;
+                    end
+                end
                 // Execute read
-                bfm.axi_read(address, data, len, burst_type);
+                data_beats.delete();
+                bfm.axi_read(address, data_beats, len, burst_type);
 
-                // Validate data if expected value was provided
+                // Validate data if expected values were provided
                 if (has_expected_data) begin
                     results.total_tests++;
-                    if (data === expected_data) begin
-                        results.passed_tests++;
-                        $display("[%0t] Line %0d: AXI Read PASS - Address: 0x%h, Data: 0x%h", 
-                                $time, line_number, address, data);
-                    end else begin
+
+                    // Check number of beats matches
+                    if (data_beats.size() != expected_data_beats.size()) begin
                         results.failed_tests++;
-                        results.last_error = $sformatf("AXI Read mismatch at 0x%h - Expected: 0x%h, Got: 0x%h",
-                                                      address, expected_data, data);
+                        results.last_error = $sformatf("AXI Read beat count mismatch - Expected: %0d beats, Got: %0d beats",
+                            expected_data_beats.size(), data_beats.size());
                         $error("[%0t] Line %0d: %s", $time, line_number, results.last_error);
+                        return;
                     end
+
+                    // Compare each beat
+                    for (int i = 0; i < data_beats.size(); i++) begin
+                        if (data_beats[i] !== expected_data_beats[i]) begin
+                            results.failed_tests++;
+                            results.last_error = $sformatf("AXI Read beat %0d mismatch at 0x%h - Expected: 0x%h, Got: 0x%h",
+                                i, address + (i * (AXI_DATA_WIDTH/8)), expected_data_beats[i], data_beats[i]);
+                            $error("[%0t] Line %0d: %s", $time, line_number, results.last_error);
+                            return;
+                        end
+                    end
+
+                    results.passed_tests++;
+                    $display("[%0t] Line %0d: AXI Read PASS - %0d beats starting at Address: 0x%h",
+                        $time, line_number, data_beats.size(), address);
                 end else begin
-                    $display("[%0t] Line %0d: AXI Read - Address: 0x%h, Data: 0x%h, Burst: %s, Length: %0d",
-                            $time, line_number, address, data, burst_type.name(), len);
+                    // Display read data without validation
+                    $display("[%0t] Line %0d: AXI Read - Address: 0x%h, Burst: %s, Length: %0d",
+                        $time, line_number, address, burst_type.name(), len);
+                    foreach (data_beats[i]) begin
+                        $display("    Beat %0d: 0x%h", i, data_beats[i]);
+                    end
                 end
             end
         endcase
@@ -339,8 +421,43 @@ class dual_protocol_command_parser #(
 
         void'($sscanf(tokens[1], "%d", cycles));
         $display("[%0t] Line %0d: Waiting for %0d cycles", $time, line_number, cycles);
-        repeat(cycles) @(posedge dual_protocol_master_tb.clk_max);
+        repeat(cycles) @(posedge pnvmr_mini_tb.clk_max);
     endtask
+
+
+
+
+
+// Memory load structure
+    mem_load_t current_mem_load = '{memory_path: "dual_protocol_master_tb.temp_memory", data_file_path: ""};
+
+    
+
+    // Process MEM_LOAD command
+    protected task automatic process_mem_load_command(string tokens[$]);
+        // Validate command format
+        if (tokens.size() != 3) begin
+            $error("[%0t] Line %0d: Invalid MEM_LOAD command format  %s  %s:", $time, line_number, tokens[1].toupper() ,tokens[2].toupper());
+            $error("Format: MEM_LOAD <memory_path> <data_file_path>");
+            $error("Example: MEM_LOAD unit.subunit.memory_r preload_data/2m/addr_data_prram_bgred.mem");
+            return;
+        end
+
+        // Store paths and trigger event
+        current_mem_load.memory_path = tokens[1];
+        current_mem_load.data_file_path = tokens[2];
+
+        $display("[%0t] Line %0d: Memory load request - Memory: %s, File: %s",
+            $time, line_number, current_mem_load.memory_path, current_mem_load.data_file_path);
+
+        -> $root.pnvmr_mini_tb.mem_load_event;
+    endtask
+
+    // Getter method for memory load information
+    function mem_load_t get_current_mem_load();
+        return current_mem_load;
+    endfunction
+
 
     ///////////////////////////////////////////////////////////////////////////
     // Protected Functions - Parsing Helpers
@@ -348,16 +465,20 @@ class dual_protocol_command_parser #(
 
     // Parse protocol and command type
     protected function bit parse_protocol_and_command(
-        string tokens[$],
-        output protocol_t protocol,
-        output command_t command
-    );
+            string tokens[$],
+            output protocol_t protocol,
+            output command_t command
+        );
         if (tokens.size() < 2) return 0;
 
         // Parse protocol
         case (tokens[0].toupper())
-            "AHB": protocol = AHB;
-            "AXI": protocol = AXI;
+            "AHB": protocol      = AHB;
+            "AXI": protocol      = AXI;
+            "MEM_LOAD": begin
+                protocol = MEM_LOAD;
+                return 1;
+            end
             "WAIT": begin
                 protocol = WAIT;
                 return 1;
@@ -386,7 +507,7 @@ class dual_protocol_command_parser #(
     // Parse hex value with width checking
     protected function bit parse_hex_value(string hex_str, output logic [127:0] value, input int width);
         string trimmed_str = hex_str;
-        
+
         // Remove '0x' prefix if present
         if (trimmed_str.len() >= 2 && trimmed_str.substr(0, 1) == "0x") begin
             trimmed_str = trimmed_str.substr(2, trimmed_str.len() - 1);
@@ -397,8 +518,8 @@ class dual_protocol_command_parser #(
 
         // Validate string length
         if (trimmed_str.len() > (width / 4)) begin
-            $error("[%0t] Line %0d: Value %s exceeds %0d-bit width", 
-                   $time, line_number, hex_str, width);
+            $error("[%0t] Line %0d: Value %s exceeds %0d-bit width",
+                $time, line_number, hex_str, width);
             return 0;
         end
 
@@ -414,9 +535,9 @@ class dual_protocol_command_parser #(
     // Parse AXI data value
     protected function bit parse_axi_data(string data_str, output logic [AXI_DATA_WIDTH-1:0] data);
         logic [127:0] parsed_value;
-        
+
         if (!parse_hex_value(data_str, parsed_value, AXI_DATA_WIDTH)) return 0;
-        
+
         data = parsed_value[AXI_DATA_WIDTH-1:0];
         return 1;
     endfunction
@@ -433,15 +554,15 @@ class dual_protocol_command_parser #(
     // Read next valid line (skipping comments and empty lines)
     protected function bit read_next_valid_line();
         string line;
-        
+
         while ($fgets(line, file_handle)) begin
             line_number++;
             current_line = strip_comments(line);
-            
+
             // Skip empty lines
             if (current_line.len() > 0) return 1;
         end
-        
+
         return 0;
     endfunction
 
@@ -450,33 +571,34 @@ class dual_protocol_command_parser #(
         string result = "";
         int start_idx = 0;
         int end_idx = 0;
-        
+
         // First strip comments
         foreach (line[i]) begin
             if (line[i] == "#") break;
             result = {result, string'(line[i])};
         end
-        
+
         // Then remove leading whitespace
         start_idx = 0;
-        while (start_idx < result.len() && 
-              (result[start_idx] == " " || 
-               result[start_idx] == "\t" || 
-               result[start_idx] == "\n" || 
-               result[start_idx] == "\r")) begin
+        while (start_idx < result.len() &&
+                (result[start_idx] == " " ||
+                    result[start_idx] == "\t" ||
+                    result[start_idx] == "\n" ||
+                    result[start_idx] == "\r")) begin
             start_idx++;
         end
-        
+
         // Find last non-whitespace character
         end_idx = result.len() - 1;
-        while (end_idx >= 0 && 
-              (result[end_idx] == " " || 
-               result[end_idx] == "\t" || 
-               result[end_idx] == "\n" || 
-               result[end_idx] == "\r")) begin
+        while (end_idx >= 0 &&
+                (result[end_idx] == " " ||
+                    result[end_idx] == "\t" ||
+                    result[end_idx] == "\n" ||
+                    result[end_idx] == "\r"
+                )) begin
             end_idx--;
         end
-        
+
         // Return trimmed string
         if (start_idx <= end_idx)
             return result.substr(start_idx, end_idx);
@@ -484,45 +606,102 @@ class dual_protocol_command_parser #(
             return "";
     endfunction
 
+
     // Tokenize line into words
     protected function void tokenize(input string line, ref string tokens[$]);
         string remaining = line;
         int start_idx;
-        int end_idx;
-        
+        int space_idx;
+        int mem_path_start;
+        int mem_path_end;
+
         tokens.delete();
-        
-        while (remaining.len() > 0) begin
+
+        // Special handling for MEM_LOAD command
+        if (line.len() >= 8 && line.substr(0, 7) == "MEM_LOAD") begin
+            // First token is MEM_LOAD
+            tokens.push_back("MEM_LOAD");
+
+            // Remove "MEM_LOAD" from the beginning
+            remaining = line.substr(8, line.len()-1);
+
             // Skip leading whitespace
-            start_idx = 0;
-            while (start_idx < remaining.len() && 
-                  (remaining[start_idx] == " " || 
-                   remaining[start_idx] == "\t" || 
-                   remaining[start_idx] == "\n" || 
-                   remaining[start_idx] == "\r")) begin
-                start_idx++;
+            mem_path_start = 0;
+            while (mem_path_start < remaining.len() &&
+                    (remaining[mem_path_start] == " " ||
+                        remaining[mem_path_start] == "\t" ||
+                        remaining[mem_path_start] == "\n" ||
+                        remaining[mem_path_start] == "\r")) begin
+                mem_path_start++;
             end
-            
-            if (start_idx >= remaining.len()) break;
-            
-            // Find end of token
-            end_idx = start_idx;
-            while (end_idx < remaining.len() && 
-                  !(remaining[end_idx] == " " || 
-                    remaining[end_idx] == "\t" || 
-                    remaining[end_idx] == "\n" || 
-                    remaining[end_idx] == "\r")) begin
-                end_idx++;
+
+            // Find the last space in the remaining string
+            space_idx = remaining.len() - 1;
+            while (space_idx >= 0) begin
+                if (remaining[space_idx] == " ") break;
+                space_idx--;
             end
-            
-            // Extract token
-            tokens.push_back(remaining.substr(start_idx, end_idx-1));
-            
-            // Move to next token
-            if (end_idx >= remaining.len())
-                break;
-            remaining = remaining.substr(end_idx, remaining.len()-1);
+
+            // Work backwards to find the space that separates memory path and file path
+            while (space_idx >= mem_path_start) begin
+                if (remaining[space_idx-1] != " ") begin
+                    // Extract memory path and file path
+                    tokens.push_back(remaining.substr(mem_path_start, space_idx-1));
+
+                    // Skip any whitespace before file path
+                    mem_path_end = space_idx + 1;
+                    while (mem_path_end < remaining.len() &&
+                            (remaining[mem_path_end] == " " ||
+                                remaining[mem_path_end] == "\t" ||
+                                remaining[mem_path_end] == "\n" ||
+                                remaining[mem_path_end] == "\r")) begin
+                        mem_path_end++;
+                    end
+
+                    tokens.push_back(remaining.substr(mem_path_end, remaining.len()-1));
+                    break;
+                end
+                space_idx--;
+            end
+        end else begin
+            // Original tokenization for other commands
+            while (remaining.len() > 0) begin
+                // Skip leading whitespace
+                start_idx = 0;
+                while (start_idx < remaining.len() &&
+                        (remaining[start_idx] == " " ||
+                            remaining[start_idx] == "\t" ||
+                            remaining[start_idx] == "\n" ||
+                            remaining[start_idx] == "\r")) begin
+                    start_idx++;
+                end
+
+                if (start_idx >= remaining.len()) break;
+
+                // Find end of token
+                space_idx = start_idx;
+                while (space_idx < remaining.len() &&
+                        !(remaining[space_idx] == " " ||
+                            remaining[space_idx] == "\t" ||
+                            remaining[space_idx] == "\n" ||
+                            remaining[space_idx] == "\r")) begin
+                    space_idx++;
+                end
+
+                // Extract token
+                tokens.push_back(remaining.substr(start_idx, space_idx-1));
+
+                // Move to next token
+                if (space_idx >= remaining.len())
+                    break;
+                remaining = remaining.substr(space_idx, remaining.len()-1);
+            end
         end
+
+        // Debug printing
+//        foreach (tokens[i]) begin
+//            $display("[%0t] Token[%0d]: %s", $time, i, tokens[i]);
+//        end
     endfunction
 
     // Parse AHB burst type
@@ -537,8 +716,8 @@ class dual_protocol_command_parser #(
             "WRAP8":  return WRAP8;
             "WRAP16": return WRAP16;
             default: begin
-                $error("[%0t] Line %0d: Invalid AHB burst type: %s", 
-                       $time, line_number, burst_str);
+                $error("[%0t] Line %0d: Invalid AHB burst type: %s",
+                    $time, line_number, burst_str);
                 return SINGLE;
             end
         endcase
@@ -551,8 +730,8 @@ class dual_protocol_command_parser #(
             "HALFWORD": return HALFWORD;
             "WORD":     return WORD;
             default: begin
-                $error("[%0t] Line %0d: Invalid AHB size: %s", 
-                       $time, line_number, size_str);
+                $error("[%0t] Line %0d: Invalid AHB size: %s",
+                    $time, line_number, size_str);
                 return WORD;
             end
         endcase
@@ -565,8 +744,8 @@ class dual_protocol_command_parser #(
             "INCR":  return AXI_INCR;
             "WRAP":  return AXI_WRAP;
             default: begin
-                $error("[%0t] Line %0d: Invalid AXI burst type: %s", 
-                       $time, line_number, burst_str);
+                $error("[%0t] Line %0d: Invalid AXI burst type: %s",
+                    $time, line_number, burst_str);
                 return AXI_INCR;
             end
         endcase
