@@ -146,7 +146,7 @@ interface dual_protocol_master_bfm #(
         axi_awsize  = (AXI_DATA_WIDTH == 128) ? 3'b100 : 3'b011;  // 16 bytes for 128-bit, 8 bytes for 64-bit
         
         while (!axi_awready) @(posedge axi_clk);
-        @(posedge axi_clk);
+        //@(posedge axi_clk);
         axi_awvalid = 1'b0;
         
         // Data Phase
@@ -156,22 +156,27 @@ interface dual_protocol_master_bfm #(
         axi_wlast  = 1'b1;
         
         while (!axi_wready) @(posedge axi_clk);
-        @(posedge axi_clk);
+        //@(posedge axi_clk);
         axi_wvalid = 1'b0;
         
         // Response Phase
         axi_bready = 1'b1;
         while (!axi_bvalid) @(posedge axi_clk);
-        @(posedge axi_clk);
+        //@(posedge axi_clk);
         axi_bready = 1'b0;
     endtask
 
-    task automatic axi_read(
+ task automatic axi_read(
         input  logic [31:0] address,
-        output logic [AXI_DATA_WIDTH-1:0] data,
+        output logic [AXI_DATA_WIDTH-1:0] data[$],  // Now returns a queue of data
         input  logic [7:0]  len,
         input  logic [1:0]  burst_type
     );
+        logic [AXI_DATA_WIDTH-1:0] current_data;
+        
+        // Clear the data queue
+        data.delete();
+        
         // Address Phase
         @(posedge axi_clk);
         axi_arvalid = 1'b1;
@@ -181,24 +186,25 @@ interface dual_protocol_master_bfm #(
         axi_arsize  = (AXI_DATA_WIDTH == 128) ? 3'b100 : 3'b011;  // 16 bytes for 128-bit, 8 bytes for 64-bit
         
         while (!axi_arready) @(posedge axi_clk);
-        //@(posedge clk);
+        //@(posedge axi_clk);
         axi_arvalid = 1'b0;
         
         // Data Phase
         axi_rready = 1'b1;
-        while (!axi_rvalid) @(posedge axi_clk);
-        #1ps
-        data = axi_rdata;
         
-        while (!axi_rlast) begin
+        // Collect all beats of data
+        do begin
             @(posedge axi_clk);
-            #1ps
-            if (axi_rvalid) data = axi_rdata;
-        end
+            if (axi_rvalid) begin
+                current_data = axi_rdata;
+                data.push_back(current_data);
+            end
+        end while (!axi_rlast || !axi_rvalid);
         
         @(posedge axi_clk);
         axi_rready = 1'b0;
     endtask
+
 
     // Initial block for signal initialization
     initial begin
