@@ -1,17 +1,177 @@
-# Example dual protocol transaction commands
-# Initialize system
-WAIT 100
+###############################################################################
+#                    Dual Protocol Command Format Reference                   #
+###############################################################################
 
-# AHB transactions
-AHB WRITE 0x1000_0000 0xDEADBEEF SINGLE WORD
-WAIT 10
-AHB READ 0x1000_0000 SINGLE WORD
+=====================================
+1. PROTOCOL TYPES
+=====================================
+AHB: Advanced High-Performance Bus protocol
+AXI: Advanced eXtensible Interface protocol
 
-# AXI transactions
-AXI WRITE 0x2000_0000 0xCAFEBABEDEADBEEF INCR 0
-WAIT 10
-AXI READ 0x2000_0000 INCR 0
+=====================================
+2. COMMAND TYPES
+=====================================
+WRITE:       Single write transaction
+READ:        Single read transaction
+BURST_WRITE: Burst write transaction (AXI only)
+BURST_READ:  Burst read transaction (AXI only)
+WAIT:        Wait for specified clock cycles
 
-# Burst transactions
-AHB WRITE 0x3000_0000 0x11111111 INCR4 WORD
-AXI BURST_WRITE 0x4000
+=====================================
+3. AHB COMMANDS
+=====================================
+-----------------
+3.1 AHB WRITE
+-----------------
+Format:  AHB WRITE <address_hex> <data_hex> [burst_type] [size]
+Example: AHB WRITE 0x10000000 0xDEADBEEF SINGLE WORD
+
+-----------------
+3.2 AHB READ
+-----------------
+Format:  AHB READ <address_hex> [burst_type] [size] <expected_data_hex>
+Example: AHB READ 0x10000000 INCR4 WORD
+Example : AHB READ command with expected error response
+AHB READ 0x10000000 SINGLE WORD ERR
+
+-----------------
+3.3 AHB Parameters
+-----------------
+Burst Types:
+- SINGLE  : Single transfer
+- INCR    : Incrementing burst of undefined length
+- INCR4   : 4-beat incrementing burst
+- INCR8   : 8-beat incrementing burst
+- INCR16  : 16-beat incrementing burst
+- WRAP4   : 4-beat wrapping burst
+- WRAP8   : 8-beat wrapping burst
+- WRAP16  : 16-beat wrapping burst
+
+Size Types:
+- BYTE     : 8-bit transfer
+- HALFWORD : 16-bit transfer
+- WORD     : 32-bit transfer
+
+=====================================
+4. AXI COMMANDS
+=====================================
+-----------------
+4.1 AXI WRITE
+-----------------
+Format:  AXI WRITE <address_hex> <data_hex> [burst_type] [len]
+Example: AXI WRITE 0x20000000 0xCAFEBABEDEADBEEF INCR 0  # Single beat
+
+-----------------
+4.2 AXI READ
+-----------------
+Format: AXI READ <address_hex> [burst_type] [len] [expected_data_beat0] [expected_data_beat1] ...
+
+Examples:
+# Single beat (len=0):
+AXI READ 0x80000000 WRAP 0 0x000000C000000080
+
+# Two beats (len=1):
+AXI READ 0x80000000 WRAP 1 0x000000C000000080 0x0000004000000000
+
+# Four beats (len=3):
+AXI READ 0x80000000 WRAP 3 0xBEAT0 0xBEAT1 0xBEAT2 0xBEAT3
+
+-----------------
+4.3 AXI Parameters
+-----------------
+Burst Types:
+- FIXED : Fixed address burst
+- INCR  : Incrementing address burst
+- WRAP  : Wrapping burst
+
+Burst Length (len):
+len = (number_of_beats - 1)
+Examples:
+- len = 0: 1 beat
+- len = 1: 2 beats
+- len = 2: 3 beats
+- len = 3: 4 beats
+...and so on
+
+=====================================
+5. EXAMPLES WITH 128-BIT AXI WIDTH
+=====================================
+# Single beat (len=0)
+AXI READ 0x80000000 WRAP 0 0x000000C000000080000000400000000
+
+# Two beats (len=1)
+AXI READ 0x80000000 WRAP 1 \
+    0x000000C000000080000000400000000 \
+    0x000000D000000090000000500000000
+=====================================
+6. WAIT COMMAND
+=====================================
+Format:  WAIT <cycles>
+Example: WAIT 10
+Purpose: Pause execution for specified number of clock cycles
+
+=====================================
+7. WAIT_TIME COMMAND
+=====================================
+Format:  WAIT_TIME <time_value> <time_unit>
+Example: WAIT_TIME 100 ms
+Purpose: Pause execution for a specified time duration. The time value is given as a decimal, 
+         and the unit is one of the following: "ns", "us", "ms", "sec", "min", or "hour".
+
+=====================================
+8. REG_POLL_MASKED COMMAND
+=====================================
+Format:  REG_POLL_MASKED <reg_add_hex> <expected_value_hex> <mask_hex>
+Example: REG_POLL_MASKED 0x10000000 0xDEADBEEF 0xFFFF0000
+Purpose: Poll a register until the masked read data matches the masked expected value.
+         The mask is applied to both the read data and the expected value before comparison.
+
+
+=====================================
+9. MEMORY LOADING COMMAND
+=====================================
+-----------------
+9.1 MEM_LOAD
+-----------------
+Format:  MEM_LOAD <memory_path> <data_file_path>
+Example: MEM_LOAD unit.subunit.memory_r preload_data/2m/addr_data_prram_bgred.mem
+
+Parameters:
+- memory_path: Hierarchical path to the memory in the design
+  Format: unit.subunit.memory_name
+  Example: top.dut.ram_block.memory_r
+
+- data_file_path: Path to the memory initialization file
+  Format: relative or absolute path to .mem file
+  Example: preload_data/2m/addr_data_prram_bgred.mem
+
+Notes:
+- Paths can use either forward slashes (/) or backslashes (\)
+- Relative paths are relative to the simulation directory
+
+
+=====================================
+10. IMPORTANT NOTES
+=====================================
+1. Data Format:
+   - All addresses and data values are in hexadecimal
+   - Underscores can be used for readability (0x1000_0000)
+   - '0x' prefix is optional
+
+2. AXI Burst Length:
+   - len field specifies (number_of_beats - 1)
+   - Number of expected data values must match (len + 1)
+   - Data values must be provided in beat order
+
+3. Data Width:
+   - AHB: 32-bit data width
+   - AXI: Configurable 64-bit or 128-bit data width
+
+4. Command Validation:
+   - Number of data beats must match len+1
+   - Burst types must be valid for the protocol
+   - Data width must match the configuration
+
+###############################################################################
+#                               End of File                                   #
+###############################################################################
